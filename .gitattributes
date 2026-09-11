@@ -1,0 +1,22 @@
+# Normalizza i fine riga: nel repo sempre LF, in locale quello che serve.
+# Necessario perche' 9 file sotto src/ sono attualmente in CRLF e gli altri 60 in LF.
+* text=auto eol=lf
+
+*.vue   text diff=html
+*.js    text
+*.css   text diff=css
+*.html  text diff=html
+*.md    text diff=markdown
+*.php   text diff=php
+*.json  text
+*.sql   text
+
+# Binari: mai convertiti
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary

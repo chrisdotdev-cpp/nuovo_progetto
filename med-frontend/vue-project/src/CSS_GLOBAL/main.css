@@ -1,0 +1,76 @@
+/* Tailwind v4: un solo import, nessun file di configurazione richiesto */
+@import "tailwindcss";
+
+/*
+  Compatibilita' con la scala ombre di Tailwind v3.
+  In v4 i nomi sono slittati (shadow-sm -> shadow-xs): questi valori riportano
+  shadow-sm / shadow / shadow-md ai valori con cui e' stata disegnata la UI esistente.
+*/
+@theme {
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+
+/* In v4 il colore di bordo di default e' currentColor: si ripristina il grigio v3 */
+@layer base {
+  *,
+  ::after,
+  ::before {
+    border-color: var(--color-gray-200, #e5e7eb);
+  }
+
+  /* Mobile-first: evita lo zoom automatico di iOS sugli input sotto i 16px */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  @media (min-width: 640px) {
+    input,
+    select,
+    textarea {
+      font-size: inherit;
+    }
+  }
+
+  /* Safe area per build Capacitor (notch) */
+  body {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Toast: posizione e larghezza coerenti su tutti i breakpoint */
+.toastify {
+  position: fixed !important;
+  right: 20px !important;
+  left: auto !important;
+  top: 20px !important;
+  z-index: 999999 !important;
+  text-align: center !important;
+}
+
+/* Tablet */
+@media (max-width: 1024px) {
+  .toastify {
+    max-width: 420px !important;
+  }
+}
+
+/* Smartphone */
+@media (max-width: 640px) {
+  .toastify {
+    max-width: 280px !important;
+  }
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+}
+
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+}

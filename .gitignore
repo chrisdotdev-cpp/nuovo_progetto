@@ -1,0 +1,155 @@
+# ==========================================================================
+# Gestionale Sanitario — monorepo (Vue 3 + Vite + Laravel 12)
+# .gitignore di root: vale per med-frontend/ e med-backend/
+# ==========================================================================
+
+# ---------------------------- Node / npm ---------------------------------
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+jspm_packages/
+*.tgz
+.node_repl_history
+
+# ---------------------------- Log ----------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# ---------------------------- Build / output -----------------------------
+dist/
+dist-ssr/
+build/
+.output/
+*.local
+
+# ---------------------------- Vite / bundler cache -----------------------
+.vite/
+.vite-cache/
+*.timestamp-*-*.mjs
+.rollup.cache/
+.rolldown/
+.turbo/
+.parcel-cache/
+.cache/
+.temp/
+.tmp/
+
+# ---------------------------- Tailwind / PostCSS -------------------------
+# Tailwind v4 non genera file, ma alcuni tool scrivono qui
+.postcssrc.cache
+tailwind.output.css
+
+# ---------------------------- Test / coverage ----------------------------
+coverage/
+*.lcov
+.nyc_output/
+__screenshots__/
+# Vitest
+.vitest/
+# Playwright (artefatti rigenerabili a ogni run)
+playwright-report/
+playwright/.cache/
+test-results/
+blob-report/
+/cypress/videos/
+/cypress/screenshots/
+
+# ---------------------------- Variabili d'ambiente -----------------------
+# MAI versionare: contengono APP_KEY, credenziali DB, SMTP.
+# Si versionano solo i .env.example.
+.env
+.env.*
+!.env.example
+!.env.*.example
+.env.backup
+.env.production
+
+# ---------------------------- PHP / Laravel ------------------------------
+/vendor/
+med-backend/vendor/
+med-backend/public/build/
+med-backend/public/hot/
+med-backend/public/storage/
+med-backend/storage/*.key
+med-backend/storage/pail/
+med-backend/storage/app/public/*
+!med-backend/storage/app/public/.gitignore
+med-backend/storage/framework/cache/*
+med-backend/storage/framework/sessions/*
+med-backend/storage/framework/testing/*
+med-backend/storage/framework/views/*
+med-backend/storage/logs/*
+!**/storage/**/.gitignore
+med-backend/bootstrap/cache/*.php
+.phpunit.result.cache
+.phpunit.cache/
+.phpactor.json
+/auth.json
+Homestead.json
+Homestead.yaml
+.php-cs-fixer.cache
+.php_cs.cache
+
+# ---------------------------- Database -----------------------------------
+*.sqlite
+*.sqlite-journal
+*.sqlite3
+*.db
+# Dump SQL locali: NON vanno nel repo (dati di test, spesso pesanti)
+dati_test.sql
+sincronizza_profili.sql
+
+# ---------------------------- Capacitor (se aggiunto in futuro) ----------
+android/
+ios/
+capacitor.config.local.*
+.capacitor/
+*.keystore
+*.jks
+*.mobileprovision
+*.p12
+
+# ---------------------------- Editor / IDE -------------------------------
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+.fleet/
+.nova/
+.zed/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+
+# ---------------------------- Sistema operativo --------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------------------------- Vari --------------------------------------
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+*.bak
+*.orig
+*.rej
+file_md/
+*~
