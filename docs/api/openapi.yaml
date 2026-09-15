@@ -1,0 +1,2944 @@
+openapi: 3.0.3
+
+info:
+  title: Gestionale Sanitario — API v1
+  version: "1.0.0"
+  description: |
+    API REST del gestionale sanitario: agenda e prenotazioni, cartelle cliniche,
+    prescrizioni, magazzino farmaceutico, teleconsulti e fatturazione.
+
+    ## Autenticazione
+
+    Laravel Sanctum in modalità **API token**. Nessun cookie, nessun CSRF: il token
+    ottenuto da `POST /auth/login` va inviato in ogni richiesta successiva
+    nell'header `Authorization: Bearer <token>`.
+
+    Il token ha una scadenza configurabile (`SANCTUM_TOKEN_EXPIRATION`, default 720
+    minuti) e può essere rinnovato con `POST /auth/refresh` senza reinserire le
+    credenziali.
+
+    ## Autorizzazione
+
+    L'accesso è filtrato su due livelli indipendenti:
+
+    1. **Middleware di area** (`role:admin`, `role:medico`, `role:paziente`) — blocca
+       l'accesso a interi gruppi di rotte prima di qualsiasi query. Risponde `403`.
+    2. **Policy per risorsa** — verifica che quello specifico utente possa agire su
+       quello specifico record: un paziente vede solo i propri dati, un medico solo i
+       propri assistiti. Risponde `403`.
+
+    Le operazioni riservate a un ruolo sono segnalate nella descrizione di ciascun
+    endpoint.
+
+    ## Formato degli errori
+
+    Ogni errore, di qualunque tipo, ha la stessa forma:
+
+    ```json
+    { "message": "I dati inviati non sono validi.", "errors": { "email": ["..."] } }
+    ```
+
+    Il campo `errors` è presente solo sulle risposte `422`. Anche le rotte inesistenti
+    rispondono JSON, mai HTML.
+
+    ## Paginazione
+
+    Gli elenchi restituiscono il paginator standard di Laravel: i record in `data`, i
+    metadati in `meta` (`current_page`, `last_page`, `per_page`, `total`) e i link di
+    navigazione in `links`. Il parametro `per_page` controlla la dimensione di pagina.
+
+    ## Limiti di frequenza
+
+    120 richieste al minuto per utente autenticato (per indirizzo IP se anonimo).
+    Il login ha un limitatore dedicato e, in aggiunta, un conteggio dei soli tentativi
+    **falliti** per coppia email+IP, azzerato al primo accesso riuscito. Superata la
+    soglia si riceve `429`.
+  contact:
+    name: Repository del progetto
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Ambiente di sviluppo locale
+  - url: /api/v1
+    description: Stessa origine (tramite proxy Vite in sviluppo)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Autenticazione
+    description: Login, sessione, profilo dell'utente autenticato
+  - name: Dashboard
+    description: Riepilogo dipendente dal ruolo
+  - name: Notifiche
+    description: Centro notifiche dell'utente
+  - name: Utenti
+    description: Gestione degli account — riservata all'amministrazione
+  - name: Pazienti
+    description: Anagrafiche pazienti e cartella clinica
+  - name: Medici
+    description: Profili professionali, orari e disponibilità
+  - name: Appuntamenti
+    description: Agenda e prenotazioni
+  - name: Cartella clinica
+    description: Referti, diagnosi, esami
+  - name: Documenti
+    description: Archivio documentale con flusso di firma
+  - name: Prescrizioni
+    description: Ricette e relative righe
+  - name: Farmacia
+    description: Anagrafica farmaci e movimenti di magazzino
+  - name: Richieste
+    description: Richieste dei pazienti e triage medico
+  - name: Telemedicina
+    description: Sessioni di teleconsulto e chat
+  - name: Fatturazione
+    description: Fatture, incassi e reportistica
+
+# =============================================================================
+paths:
+# =============================================================================
+
+  # ------------------------------- Autenticazione ---------------------------
+  /auth/login:
+    post:
+      tags: [Autenticazione]
+      summary: Autentica un utente e rilascia un token
+      description: |
+        Unica rotta pubblica dell'API.
+
+        Il parametro `role` è opzionale ma, se presente, deve coincidere con il ruolo
+        reale dell'account: impedisce che un paziente acceda dalla schermata di login
+        dell'amministrazione. Un `device_name` diverso mantiene sessioni indipendenti
+        su dispositivi diversi; lo stesso `device_name` revoca il token precedente.
+
+        Credenziali errate ed email inesistente producono lo stesso messaggio, per non
+        rivelare quali indirizzi siano registrati.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  example: paziente@clinica.it
+                password:
+                  type: string
+                  format: password
+                  example: password
+                role:
+                  type: string
+                  enum: [admin, medico, paziente]
+                  nullable: true
+                  description: Se valorizzato deve coincidere con il ruolo dell'account
+                device_name:
+                  type: string
+                  maxLength: 255
+                  nullable: true
+                  example: web
+      responses:
+        "200":
+          description: Autenticazione riuscita
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    example: 3|kY8fT2mN9xQ1wE5rT7yU0iO3pA6sD9fG2hJ4kL7z
+                  expires_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  user:
+                    $ref: "#/components/schemas/User"
+                  redirect:
+                    type: string
+                    description: Rotta di atterraggio del frontend, dipendente dal ruolo
+                    example: /paziente/panoramica
+        "401":
+          description: Credenziali non valide o ruolo non corrispondente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Account sospeso o in attesa di attivazione
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /auth/me:
+    get:
+      tags: [Autenticazione]
+      summary: Restituisce l'utente autenticato e il profilo collegato
+      description: |
+        Include la scheda paziente o il profilo medico a seconda del ruolo. Per il
+        paziente carica anche il medico di base; per il medico l'orario settimanale.
+      responses:
+        "200":
+          description: Utente corrente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/refresh:
+    post:
+      tags: [Autenticazione]
+      summary: Rinnova il token di sessione
+      description: Emette un token nuovo e revoca quello corrente. Non richiede la password.
+      responses:
+        "200":
+          description: Token rinnovato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  expires_at: { type: string, format: date-time, nullable: true }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/logout:
+    post:
+      tags: [Autenticazione]
+      summary: Revoca il token del dispositivo corrente
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/logout-all:
+    post:
+      tags: [Autenticazione]
+      summary: Revoca i token di tutti i dispositivi
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /auth/profile:
+    put:
+      tags: [Autenticazione]
+      summary: Aggiorna i dati di contatto dell'utente autenticato
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 255 }
+                email: { type: string, format: email, maxLength: 255 }
+                phone: { type: string, maxLength: 30, nullable: true }
+                avatar:
+                  type: string
+                  format: binary
+                  nullable: true
+                  description: Immagine, massimo 2 MB
+      responses:
+        "200":
+          description: Profilo aggiornato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/password:
+    put:
+      tags: [Autenticazione]
+      summary: Cambia la password
+      description: |
+        Richiede la password attuale. Al cambio, i token di **tutti gli altri**
+        dispositivi vengono revocati; resta valido solo quello in uso.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, password, password_confirmation]
+              properties:
+                current_password: { type: string, format: password }
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                  description: Almeno 8 caratteri, con lettere e numeri
+                password_confirmation: { type: string, format: password }
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # --------------------------------- Dashboard ------------------------------
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Riepilogo per l'utente autenticato
+      description: |
+        Endpoint unico: è il backend a decidere il contenuto in base al ruolo.
+
+        - **paziente** — prossimi appuntamenti, referti recenti, saldo da pagare
+        - **medico** — agenda del giorno, richieste da gestire, pazienti in carico
+        - **admin** — totali di struttura, incassi, ultimi utenti registrati
+
+        La scelta di un solo endpoint invece di tre evita che il frontend debba
+        conoscere il ruolo per sapere quale risorsa interrogare.
+      responses:
+        "200":
+          description: Dati di riepilogo, struttura dipendente dal ruolo
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  # --------------------------------- Notifiche ------------------------------
+  /notifications:
+    get:
+      tags: [Notifiche]
+      summary: Elenco delle notifiche dell'utente
+      description: Restituisce solo le notifiche del destinatario autenticato, dalla più recente.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - name: unread
+          in: query
+          schema: { type: boolean }
+          description: Se true restituisce solo le non lette
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [appuntamento, referto, prescrizione, pagamento, sistema, messaggio]
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Notification" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /notifications/unread-count:
+    get:
+      tags: [Notifiche]
+      summary: Conteggio delle notifiche non lette
+      description: Alimenta il badge della navbar; interrogato periodicamente dal frontend.
+      responses:
+        "200":
+          description: Conteggio
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer, example: 3 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /notifications/read-all:
+    post:
+      tags: [Notifiche]
+      summary: Segna tutte le notifiche come lette
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /notifications/{notification}/read:
+    post:
+      tags: [Notifiche]
+      summary: Segna una notifica come letta
+      parameters: [{ $ref: "#/components/parameters/NotificationId" }]
+      responses:
+        "200":
+          description: Notifica aggiornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Notification" }
+        "403":
+          description: La notifica appartiene a un altro utente
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /notifications/{notification}:
+    delete:
+      tags: [Notifiche]
+      summary: Elimina una notifica
+      parameters: [{ $ref: "#/components/parameters/NotificationId" }]
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ----------------------------------- Utenti -------------------------------
+  /users:
+    get:
+      tags: [Utenti]
+      summary: Elenco degli account
+      description: "**Riservato all'amministrazione.**"
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Search"
+        - name: role
+          in: query
+          schema: { type: string, enum: [admin, medico, paziente] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [attivo, sospeso, in_attesa] }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Utenti]
+      summary: Crea un account
+      description: |
+        **Riservato all'amministrazione.**
+
+        Creando un account con `role: medico` viene generato contestualmente il
+        profilo professionale in `doctors`: un medico senza profilo non potrebbe avere
+        agenda né prescrizioni. Per questo `specialization` è obbligatoria in quel caso.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreUserRequest" }
+      responses:
+        "201":
+          description: Account creato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /users/{user}:
+    parameters: [{ $ref: "#/components/parameters/UserId" }]
+    get:
+      tags: [Utenti]
+      summary: Dettaglio di un account
+      description: L'amministrazione accede a qualsiasi account; ogni utente al proprio.
+      responses:
+        "200":
+          description: Account
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Utenti]
+      summary: Aggiorna un account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 255 }
+                email: { type: string, format: email }
+                role: { type: string, enum: [admin, medico, paziente] }
+                status: { type: string, enum: [attivo, sospeso, in_attesa] }
+                phone: { type: string, maxLength: 30, nullable: true }
+      responses:
+        "200":
+          description: Account aggiornato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Utenti]
+      summary: Archivia un account
+      description: |
+        **Riservato all'amministrazione.** È un *soft delete*: i dati clinici collegati
+        restano intatti. Un amministratore non può archiviare sé stesso.
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ---------------------------------- Pazienti ------------------------------
+  /patients/me:
+    get:
+      tags: [Pazienti]
+      summary: Scheda anagrafica del paziente autenticato
+      description: |
+        **Riservato al ruolo paziente.** Risponde `409` se l'account non ha una scheda
+        collegata: è una condizione di dati incoerenti, non un errore dell'utente, e il
+        messaggio lo esplicita.
+      responses:
+        "200":
+          description: Scheda del paziente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Patient" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Account paziente privo di anagrafica collegata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /patients:
+    get:
+      tags: [Pazienti]
+      summary: Elenco dei pazienti
+      description: |
+        Il perimetro dipende dal ruolo: l'amministrazione vede tutti, il medico solo i
+        propri assistiti e i pazienti già visitati. **Precluso al ruolo paziente.**
+        Un medico senza profilo riceve una lista vuota, non un errore.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Search"
+        - name: city
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Patient" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Pazienti]
+      summary: Crea una scheda anagrafica
+      description: "**Riservato all'amministrazione.** Un account non può avere due anagrafiche."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StorePatientRequest" }
+      responses:
+        "201":
+          description: Scheda creata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Patient" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /patients/{patient}:
+    parameters: [{ $ref: "#/components/parameters/PatientId" }]
+    get:
+      tags: [Pazienti]
+      summary: Dettaglio di una scheda paziente
+      responses:
+        "200":
+          description: Scheda
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Patient" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Pazienti]
+      summary: Aggiorna una scheda paziente
+      description: |
+        Il paziente può aggiornare i propri dati **ma non assegnarsi il medico di base**:
+        `primary_doctor_id` è accettato solo dall'amministrazione.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StorePatientRequest" }
+      responses:
+        "200":
+          description: Scheda aggiornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Patient" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Pazienti]
+      summary: Archivia una scheda paziente
+      description: "**Riservato all'amministrazione.** Soft delete."
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /patients/{patient}/timeline:
+    get:
+      tags: [Pazienti, Cartella clinica]
+      summary: Storia clinica del paziente in ordine cronologico
+      description: |
+        Aggrega referti, diagnosi, esami e prescrizioni in un'unica sequenza ordinata
+        per data. È la vista che alimenta la cartella clinica del frontend.
+      parameters: [{ $ref: "#/components/parameters/PatientId" }]
+      responses:
+        "200":
+          description: Voci della timeline
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/MedicalRecord" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ----------------------------------- Medici -------------------------------
+  /doctors/specializations:
+    get:
+      tags: [Medici]
+      summary: Elenco delle specializzazioni presenti
+      description: Alimenta i filtri di ricerca del frontend. Visibile a ogni utente autenticato.
+      responses:
+        "200":
+          description: Specializzazioni distinte
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { type: string, example: Cardiologia }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /doctors/{doctor}/availability:
+    get:
+      tags: [Medici, Appuntamenti]
+      summary: Slot prenotabili di un medico in una data
+      description: |
+        La disponibilità **non è persistita**: viene calcolata intersecando l'orario
+        settimanale del medico, le sue assenze e gli appuntamenti già presi, escludendo
+        gli slot nel passato. Se il medico è in ferie o non ha fasce attive per quel
+        giorno della settimana, l'elenco è vuoto.
+
+        Il parametro `ignore_appointment_id` serve allo spostamento di un appuntamento
+        esistente: consente di considerare libero lo slot che esso stesso occupa.
+      parameters:
+        - $ref: "#/components/parameters/DoctorId"
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date }
+          example: "2026-09-20"
+        - name: ignore_appointment_id
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Slot della giornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Slot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /doctors:
+    get:
+      tags: [Medici]
+      summary: Elenco dei medici
+      description: |
+        Leggibile da qualunque utente autenticato: il paziente deve poter scegliere con
+        chi prenotare. Esclude i profili il cui account è stato archiviato.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Search"
+        - name: specialization
+          in: query
+          schema: { type: string }
+        - name: available_online
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Doctor" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Medici]
+      summary: Crea un profilo medico
+      description: "**Riservato all'amministrazione.**"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreDoctorRequest" }
+      responses:
+        "201":
+          description: Profilo creato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Doctor" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /doctors/{doctor}:
+    parameters: [{ $ref: "#/components/parameters/DoctorId" }]
+    get:
+      tags: [Medici]
+      summary: Dettaglio di un profilo medico
+      responses:
+        "200":
+          description: Profilo con orario settimanale
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Doctor" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Medici]
+      summary: Aggiorna profilo e orario settimanale
+      description: |
+        Modificabile dall'interessato e dall'amministrazione: un medico non può toccare
+        il profilo di un collega.
+
+        Se presente, `schedules` **sostituisce** l'intero orario settimanale, non vi si
+        accoda: è il comportamento che il frontend si aspetta quando l'utente salva la
+        griglia oraria.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/StoreDoctorRequest"
+                - type: object
+                  properties:
+                    schedules:
+                      type: array
+                      items: { $ref: "#/components/schemas/DoctorScheduleInput" }
+      responses:
+        "200":
+          description: Profilo aggiornato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Doctor" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Medici]
+      summary: Archivia un profilo medico
+      description: "**Riservato all'amministrazione.** Soft delete."
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # -------------------------------- Appuntamenti ----------------------------
+  /appointments:
+    get:
+      tags: [Appuntamenti]
+      summary: Agenda dell'utente autenticato
+      description: |
+        Ogni ruolo vede solo la propria agenda: il paziente i suoi appuntamenti, il
+        medico quelli che eroga, l'amministrazione tutti.
+
+        Il filtro `date` su un solo giorno copre l'intera giornata, non l'istante di
+        mezzanotte.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [in_attesa, confermato, completato, annullato, assente]
+        - name: date
+          in: query
+          schema: { type: string, format: date }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: upcoming
+          in: query
+          schema: { type: boolean }
+          description: Solo gli appuntamenti futuri
+        - name: doctor_id
+          in: query
+          schema: { type: integer }
+        - name: patient_id
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Appointment" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Appuntamenti]
+      summary: Prenota un appuntamento
+      description: |
+        Il paziente può prenotare **solo per sé stesso**; l'amministrazione può
+        prenotare per conto di terzi.
+
+        L'inserimento avviene dentro una transazione con blocco pessimistico sulla riga
+        del medico: la disponibilità viene ricontrollata dopo l'acquisizione del lock,
+        così due richieste simultanee per lo stesso slot non possono andare entrambe a
+        buon fine. Il conflitto produce `422`.
+
+        Se `type` è `telemedicina` viene creata contestualmente la stanza virtuale.
+        Alla conferma vengono notificati sia il paziente sia il medico.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreAppointmentRequest" }
+      responses:
+        "201":
+          description: Appuntamento creato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Appointment" }
+        "403":
+          description: Prenotazione per conto di un altro paziente, o account sospeso
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Account paziente privo di anagrafica collegata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: |
+            Dati non validi, oppure slot non disponibile: fuori orario, medico in ferie,
+            slot occupato anche solo parzialmente, data nel passato.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationErrorBody" }
+
+  /appointments/{appointment}:
+    parameters: [{ $ref: "#/components/parameters/AppointmentId" }]
+    get:
+      tags: [Appuntamenti]
+      summary: Dettaglio di un appuntamento
+      description: |
+        Accessibile ai soli partecipanti e all'amministrazione. Il campo `notes`, che
+        contiene le note interne del medico, **non viene serializzato per il paziente**.
+      responses:
+        "200":
+          description: Appuntamento
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Appointment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Appuntamenti]
+      summary: Modifica o sposta un appuntamento
+      description: |
+        Lo spostamento ricontrolla la disponibilità con lo stesso meccanismo della
+        prenotazione. Il cambio di `status` è riservato a medico e amministrazione.
+
+        Un appuntamento già concluso o annullato non è più modificabile: risponde `403`.
+
+        Portando lo stato a `completato` un Observer emette automaticamente la fattura,
+        se il medico ha una tariffa configurata.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateAppointmentRequest" }
+      responses:
+        "200":
+          description: Appuntamento aggiornato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Appointment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Appuntamenti]
+      summary: Elimina un appuntamento
+      description: "**Riservato all'amministrazione.** Il paziente annulla, non elimina."
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /appointments/{appointment}/cancel:
+    post:
+      tags: [Appuntamenti]
+      summary: Annulla un appuntamento
+      description: |
+        Il paziente può annullare i propri. Lo slot torna immediatamente prenotabile.
+        Un appuntamento già annullato non si annulla di nuovo.
+      parameters: [{ $ref: "#/components/parameters/AppointmentId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cancellation_reason: { type: string, maxLength: 500, nullable: true }
+      responses:
+        "200":
+          description: Appuntamento annullato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Appointment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: Appuntamento già annullato o concluso
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  # ------------------------------ Cartella clinica --------------------------
+  /medical-records:
+    get:
+      tags: [Cartella clinica]
+      summary: Elenco dei record clinici
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - name: patient_id
+          in: query
+          schema: { type: integer }
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [diagnosi, referto, esame, nota, vaccinazione, intervento]
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/MedicalRecord" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Cartella clinica]
+      summary: Registra un record clinico
+      description: "Riservato a medico e amministrazione. Il paziente legge, non scrive."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreMedicalRecordRequest" }
+      responses:
+        "201":
+          description: Record creato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/MedicalRecord" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /medical-records/{medical_record}:
+    parameters:
+      - name: medical_record
+        in: path
+        required: true
+        schema: { type: integer }
+    get:
+      tags: [Cartella clinica]
+      summary: Dettaglio di un record clinico
+      responses:
+        "200":
+          description: Record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/MedicalRecord" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Cartella clinica]
+      summary: Aggiorna un record clinico
+      description: Modificabile solo dal medico che lo ha redatto, entro i limiti definiti dalla policy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreMedicalRecordRequest" }
+      responses:
+        "200":
+          description: Record aggiornato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/MedicalRecord" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Cartella clinica]
+      summary: Archivia un record clinico
+      description: Soft delete. I dati clinici non vengono mai eliminati fisicamente.
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # --------------------------------- Documenti ------------------------------
+  /documents:
+    get:
+      tags: [Documenti]
+      summary: Elenco dei documenti
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Search"
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [consenso, referto, fattura, contratto, certificazione, altro]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [bozza, da_firmare, firmato, in_conservazione, archiviato]
+        - name: patient_id
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Document" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Documenti]
+      summary: Carica un documento
+      description: |
+        Upload multipart. Massimo 20 MB, formati ammessi PDF, JPG, PNG, DOC/DOCX,
+        XLS/XLSX. Alla ricezione viene calcolato lo `sha256` del file e salvato come
+        `checksum`, per verificarne l'integrità nel tempo.
+
+        Valorizzando `parent_document_id` il nuovo file diventa la versione successiva
+        di un documento esistente, che resta conservato.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, title, category]
+              properties:
+                file: { type: string, format: binary }
+                title: { type: string, maxLength: 255 }
+                description: { type: string, nullable: true }
+                category:
+                  type: string
+                  enum: [consenso, referto, fattura, contratto, certificazione, altro]
+                patient_id: { type: integer, nullable: true }
+                status:
+                  type: string
+                  enum: [bozza, da_firmare, firmato, in_conservazione, archiviato]
+                  nullable: true
+                parent_document_id: { type: integer, nullable: true }
+      responses:
+        "201":
+          description: Documento caricato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Document" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /documents/counters:
+    get:
+      tags: [Documenti]
+      summary: Conteggi per stato e categoria
+      description: Alimenta le schede riepilogative della sezione documentale.
+      responses:
+        "200":
+          description: Conteggi
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: integer }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /documents/sign-bulk:
+    post:
+      tags: [Documenti]
+      summary: Firma più documenti in un'unica operazione
+      description: "**Riservato all'amministrazione.**"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  items: { type: integer }
+                signature_type:
+                  type: string
+                  enum: [FEA, FEQ]
+                  nullable: true
+      responses:
+        "200":
+          description: Esito della firma massiva
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signed: { type: integer, description: Documenti effettivamente firmati }
+                  skipped: { type: integer, description: Documenti già firmati o non firmabili }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /documents/{document}:
+    parameters: [{ $ref: "#/components/parameters/DocumentId" }]
+    get:
+      tags: [Documenti]
+      summary: Dettaglio di un documento
+      responses:
+        "200":
+          description: Documento
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Document" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Documenti]
+      summary: Archivia un documento
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /documents/{document}/download:
+    get:
+      tags: [Documenti]
+      summary: Scarica il file di un documento
+      description: |
+        Il file non è servito staticamente: il download passa dal controller, che
+        applica la policy. Un paziente non può scaricare il documento di un altro
+        indovinandone l'URL.
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }]
+      responses:
+        "200":
+          description: Contenuto binario del file
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /documents/{document}/sign:
+    post:
+      tags: [Documenti]
+      summary: Firma un documento
+      description: "**Riservato all'amministrazione.** Registra firmatario, istante e tipo di firma (FEA o FEQ)."
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signature_type: { type: string, enum: [FEA, FEQ], nullable: true }
+      responses:
+        "200":
+          description: Documento firmato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Document" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: Documento già firmato o in stato non firmabile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /documents/{document}/archive:
+    post:
+      tags: [Documenti]
+      summary: Manda un documento in conservazione
+      description: "**Riservato all'amministrazione.**"
+      parameters: [{ $ref: "#/components/parameters/DocumentId" }]
+      responses:
+        "200":
+          description: Documento archiviato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Document" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # -------------------------------- Prescrizioni ----------------------------
+  /prescriptions:
+    get:
+      tags: [Prescrizioni]
+      summary: Elenco delle prescrizioni
+      description: Il paziente vede le proprie, il medico quelle che ha emesso, l'amministrazione tutte.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - name: patient_id
+          in: query
+          schema: { type: integer }
+        - name: status
+          in: query
+          schema: { type: string, enum: [attiva, completata, annullata, scaduta] }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Prescription" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Prescrizioni]
+      summary: Emette una prescrizione
+      description: |
+        Riservato al medico. Il numero di ricetta (`code`) è generato dal service con
+        numerazione progressiva: non si invia dal client.
+
+        Una ricetta senza farmaci non ha senso: `items` deve contenere almeno una riga.
+        Il campo `items.*.medicine_id` è facoltativo — il medico deve poter prescrivere
+        un prodotto non presente in anagrafica — ma `items.*.name` è sempre obbligatorio.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StorePrescriptionRequest" }
+      responses:
+        "201":
+          description: Prescrizione emessa
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Prescription" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /prescriptions/{prescription}:
+    parameters:
+      - name: prescription
+        in: path
+        required: true
+        schema: { type: integer }
+    get:
+      tags: [Prescrizioni]
+      summary: Dettaglio di una prescrizione con le sue righe
+      responses:
+        "200":
+          description: Prescrizione
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Prescription" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Prescrizioni]
+      summary: Aggiorna una prescrizione
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [attiva, completata, annullata, scaduta] }
+                notes: { type: string, nullable: true }
+                valid_until: { type: string, format: date, nullable: true }
+      responses:
+        "200":
+          description: Prescrizione aggiornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Prescription" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Prescrizioni]
+      summary: Archivia una prescrizione
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ---------------------------------- Farmacia ------------------------------
+  /medicines:
+    get:
+      tags: [Farmacia]
+      summary: Anagrafica dei farmaci
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Search"
+        - name: stock_status
+          in: query
+          schema: { type: string, enum: [disponibile, in_esaurimento, esaurito] }
+          description: Derivato dal confronto fra giacenza e scorta minima
+        - name: expiring
+          in: query
+          schema: { type: boolean }
+          description: Solo i lotti in scadenza
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Medicine" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Farmacia]
+      summary: Inserisce un farmaco in anagrafica
+      description: |
+        **Riservato all'amministrazione.** La giacenza iniziale si imposta qui; ogni
+        variazione successiva passa dai movimenti di magazzino, così resta tracciata.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreMedicineRequest" }
+      responses:
+        "201":
+          description: Farmaco creato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Medicine" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /medicines/summary:
+    get:
+      tags: [Farmacia]
+      summary: Riepilogo del magazzino
+      description: Totali per stato di giacenza, valore dell'inventario, lotti in scadenza.
+      responses:
+        "200":
+          description: Riepilogo
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /medicines/{medicine}:
+    parameters: [{ $ref: "#/components/parameters/MedicineId" }]
+    get:
+      tags: [Farmacia]
+      summary: Dettaglio di un farmaco
+      responses:
+        "200":
+          description: Farmaco
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Medicine" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Farmacia]
+      summary: Aggiorna un farmaco
+      description: "**Riservato all'amministrazione.**"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreMedicineRequest" }
+      responses:
+        "200":
+          description: Farmaco aggiornato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Medicine" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Farmacia]
+      summary: Archivia un farmaco
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /medicines/{medicine}/movements:
+    parameters: [{ $ref: "#/components/parameters/MedicineId" }]
+    get:
+      tags: [Farmacia]
+      summary: Estratto conto di magazzino di un farmaco
+      description: |
+        Ogni movimento registra la giacenza risultante (`stock_after`): consente di
+        ricostruire lo stato dell'inventario a una data passata e di individuare
+        incoerenze rispetto alla giacenza corrente.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+      responses:
+        "200":
+          description: Movimenti, dal più recente
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/StockMovement" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Farmacia]
+      summary: Registra un movimento di magazzino
+      description: |
+        **Riservato all'amministrazione.** La quantità è sempre positiva: è il `type` a
+        determinare il segno dell'operazione sulla giacenza.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, quantity]
+              properties:
+                type:
+                  type: string
+                  enum: [carico, scarico, reso, scaduto, rettifica]
+                quantity: { type: integer, minimum: 1 }
+                reason: { type: string, maxLength: 255, nullable: true }
+      responses:
+        "201":
+          description: Movimento registrato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StockMovement" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: Giacenza insufficiente per uno scarico
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationErrorBody" }
+
+  # --------------------------------- Richieste ------------------------------
+  /requests:
+    get:
+      tags: [Richieste]
+      summary: Elenco delle richieste
+      description: |
+        Il paziente vede le proprie; il medico vede quelle a lui assegnate più la coda
+        generale (`doctor_id` nullo). L'ordinamento di triage tiene conto di priorità e
+        anzianità.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - name: status
+          in: query
+          schema: { type: string, enum: [aperta, in_carico, risposta, chiusa] }
+        - name: priority
+          in: query
+          schema: { type: string, enum: [bassa, media, alta] }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/PatientRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Richieste]
+      summary: Invia una richiesta di consulto
+      description: |
+        Se `doctor_id` è omesso la richiesta entra nella coda generale e può essere
+        presa in carico da qualsiasi medico. Ammessi fino a 5 allegati da 10 MB
+        ciascuno, in formato PDF, JPG o PNG.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [subject, description, priority]
+              properties:
+                doctor_id: { type: integer, nullable: true }
+                subject: { type: string, maxLength: 255 }
+                description: { type: string, minLength: 10 }
+                priority: { type: string, enum: [bassa, media, alta] }
+                attachments:
+                  type: array
+                  maxItems: 5
+                  items: { type: string, format: binary }
+      responses:
+        "201":
+          description: Richiesta inviata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PatientRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /requests/{request}:
+    parameters: [{ $ref: "#/components/parameters/RequestId" }]
+    get:
+      tags: [Richieste]
+      summary: Dettaglio di una richiesta
+      responses:
+        "200":
+          description: Richiesta con allegati ed esito
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PatientRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Richieste]
+      summary: Aggiorna una richiesta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subject: { type: string, maxLength: 255 }
+                description: { type: string }
+                priority: { type: string, enum: [bassa, media, alta] }
+                status: { type: string, enum: [aperta, in_carico, risposta, chiusa] }
+      responses:
+        "200":
+          description: Richiesta aggiornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PatientRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Richieste]
+      summary: Archivia una richiesta
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /requests/{request}/claim:
+    post:
+      tags: [Richieste]
+      summary: Prende in carico una richiesta
+      description: |
+        **Riservato al ruolo medico.** Assegna la richiesta al medico chiamante e porta
+        lo stato a `in_carico`. Una richiesta già presa in carico da un collega non può
+        essere sottratta.
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      responses:
+        "200":
+          description: Richiesta presa in carico
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PatientRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: Richiesta già assegnata o chiusa
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /requests/{request}/respond:
+    post:
+      tags: [Richieste]
+      summary: Risponde a una richiesta
+      description: "**Riservato al ruolo medico.** Registra la risposta e notifica il paziente."
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [response]
+              properties:
+                response: { type: string, minLength: 5 }
+                status:
+                  type: string
+                  enum: [in_carico, risposta, chiusa]
+                  nullable: true
+      responses:
+        "200":
+          description: Risposta registrata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PatientRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /requests/{request}/convert-appointment:
+    post:
+      tags: [Richieste, Appuntamenti]
+      summary: Converte una richiesta in appuntamento
+      description: |
+        **Riservato al ruolo medico.** Crea l'appuntamento applicando gli stessi
+        controlli di disponibilità della prenotazione ordinaria, e collega l'esito alla
+        richiesta valorizzandone `appointment_id`.
+      parameters: [{ $ref: "#/components/parameters/RequestId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scheduled_at]
+              properties:
+                scheduled_at: { type: string, format: date-time }
+                duration_minutes: { type: integer, minimum: 5, maximum: 240, nullable: true }
+                type:
+                  type: string
+                  enum: [visita, controllo, telemedicina, urgenza]
+                  nullable: true
+      responses:
+        "201":
+          description: Appuntamento creato e richiesta aggiornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PatientRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: Slot non disponibile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidationErrorBody" }
+
+  /requests/attachments/{attachment}/download:
+    get:
+      tags: [Richieste]
+      summary: Scarica un allegato
+      description: Passa dalla policy della richiesta a cui l'allegato appartiene.
+      parameters:
+        - name: attachment
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Contenuto binario del file
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # -------------------------------- Telemedicina ----------------------------
+  /telemedicine:
+    get:
+      tags: [Telemedicina]
+      summary: Elenco delle sessioni dell'utente
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - name: status
+          in: query
+          schema: { type: string, enum: [programmata, in_corso, terminata, annullata] }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/TelemedicineSession" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Telemedicina]
+      summary: Apre una stanza virtuale per un appuntamento
+      description: |
+        Un appuntamento può avere al più una sessione. Il `room_code` è generato dal
+        service e non è indovinabile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [appointment_id]
+              properties:
+                appointment_id: { type: integer }
+      responses:
+        "201":
+          description: Sessione creata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/TelemedicineSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: L'appuntamento ha già una sessione
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /telemedicine/{session}:
+    parameters: [{ $ref: "#/components/parameters/SessionId" }]
+    get:
+      tags: [Telemedicina]
+      summary: Dettaglio di una sessione
+      description: |
+        Il `room_code` viene serializzato **solo se la sessione è effettivamente
+        accessibile** in quel momento: non si espone il codice di una stanza non ancora
+        aperta o già chiusa.
+      responses:
+        "200":
+          description: Sessione
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/TelemedicineSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /telemedicine/{session}/join:
+    post:
+      tags: [Telemedicina]
+      summary: Entra nella stanza virtuale
+      description: Consentito ai soli partecipanti dell'appuntamento collegato.
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200":
+          description: Accesso consentito, con il codice stanza
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/TelemedicineSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: Sessione non ancora aperta o già terminata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /telemedicine/{session}/start:
+    post:
+      tags: [Telemedicina]
+      summary: Avvia la sessione
+      description: "**Riservato al ruolo medico.** Registra l'istante di inizio."
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200":
+          description: Sessione avviata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/TelemedicineSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /telemedicine/{session}/end:
+    post:
+      tags: [Telemedicina]
+      summary: Chiude la sessione
+      description: "**Riservato al ruolo medico.** Calcola e salva la durata effettiva."
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notes: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Sessione terminata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/TelemedicineSession" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /telemedicine/{session}/messages:
+    parameters: [{ $ref: "#/components/parameters/SessionId" }]
+    get:
+      tags: [Telemedicina]
+      summary: Messaggi della chat
+      description: Conservati anche dopo la fine del consulto, come storico.
+      responses:
+        "200":
+          description: Messaggi in ordine cronologico
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/TelemedicineMessage" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Telemedicina]
+      summary: Invia un messaggio in chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string }
+      responses:
+        "201":
+          description: Messaggio inviato
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/TelemedicineMessage" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  # -------------------------------- Fatturazione ----------------------------
+  /invoices:
+    get:
+      tags: [Fatturazione]
+      summary: Elenco delle fatture
+      description: Il paziente vede le proprie, l'amministrazione tutte.
+      parameters:
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Page"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [bozza, emessa, pagata, parziale, scaduta, stornata]
+        - name: patient_id
+          in: query
+          schema: { type: integer }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Elenco paginato
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PaginatedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Invoice" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Fatturazione]
+      summary: Emette una fattura
+      description: |
+        **Riservato all'amministrazione.** Il numero progressivo è generato dal service.
+        Totale imponibile, imposta e totale documento sono calcolati dalle righe: non si
+        inviano dal client.
+
+        In condizioni normali la fattura nasce da sola quando un appuntamento passa a
+        `completato`; questo endpoint serve per le emissioni manuali.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StoreInvoiceRequest" }
+      responses:
+        "201":
+          description: Fattura emessa
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Invoice" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /invoices/report:
+    get:
+      tags: [Fatturazione]
+      summary: Report degli incassi
+      description: |
+        **Riservato all'amministrazione.** Totale fatturato, incassato e da incassare,
+        con la ripartizione per metodo di pagamento che alimenta il grafico del mix
+        incassi. Il valore "da incassare" tiene conto degli acconti parziali.
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  totale_fatturato: { type: number, format: float }
+                  totale_incassato: { type: number, format: float }
+                  da_incassare: { type: number, format: float }
+                  per_metodo:
+                    type: object
+                    additionalProperties: { type: number, format: float }
+                    example: { carta: 1250.00, bonifico: 480.50, contanti: 90.00 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /invoices/{invoice}:
+    parameters: [{ $ref: "#/components/parameters/InvoiceId" }]
+    get:
+      tags: [Fatturazione]
+      summary: Dettaglio di una fattura con righe e incassi
+      responses:
+        "200":
+          description: Fattura
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Invoice" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Fatturazione]
+      summary: Aggiorna una fattura
+      description: "**Riservato all'amministrazione.**"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                due_date: { type: string, format: date, nullable: true }
+                status:
+                  type: string
+                  enum: [bozza, emessa, pagata, parziale, scaduta, stornata]
+                notes: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Fattura aggiornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Invoice" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Fatturazione]
+      summary: Archivia una fattura
+      description: |
+        **Riservato all'amministrazione.** Soft delete. Una fattura emessa non si
+        elimina: si porta allo stato `stornata`.
+      responses:
+        "200": { $ref: "#/components/responses/GenericOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /invoices/{invoice}/pay:
+    post:
+      tags: [Fatturazione]
+      summary: Registra un incasso
+      description: |
+        Un pagamento pari al saldo residuo porta la fattura a `pagata`; un importo
+        inferiore la porta a `parziale`. Un pagamento con stato `in_attesa` non modifica
+        il saldo e non genera notifiche.
+
+        L'incasso completato notifica l'amministrazione.
+      parameters: [{ $ref: "#/components/parameters/InvoiceId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, method]
+              properties:
+                amount: { type: number, format: float, minimum: 0.01 }
+                method:
+                  type: string
+                  enum: [carta, bonifico, contanti, satispay, assicurazione]
+                status:
+                  type: string
+                  enum: [in_attesa, completato, fallito, rimborsato]
+                  nullable: true
+                transaction_ref: { type: string, maxLength: 255, nullable: true }
+                paid_at: { type: string, format: date-time, nullable: true }
+      responses:
+        "201":
+          description: Incasso registrato, con la fattura aggiornata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Invoice" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+# =============================================================================
+components:
+# =============================================================================
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Token rilasciato da `POST /auth/login`, da inviare come
+        `Authorization: Bearer <token>`.
+
+  parameters:
+    PerPage:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 15 }
+      description: Numero di record per pagina
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Search:
+      name: q
+      in: query
+      schema: { type: string }
+      description: Ricerca testuale libera
+    UserId:
+      name: user
+      in: path
+      required: true
+      schema: { type: integer }
+    PatientId:
+      name: patient
+      in: path
+      required: true
+      schema: { type: integer }
+    DoctorId:
+      name: doctor
+      in: path
+      required: true
+      schema: { type: integer }
+    AppointmentId:
+      name: appointment
+      in: path
+      required: true
+      schema: { type: integer }
+    DocumentId:
+      name: document
+      in: path
+      required: true
+      schema: { type: integer }
+    MedicineId:
+      name: medicine
+      in: path
+      required: true
+      schema: { type: integer }
+    RequestId:
+      name: request
+      in: path
+      required: true
+      schema: { type: integer }
+    SessionId:
+      name: session
+      in: path
+      required: true
+      schema: { type: integer }
+    InvoiceId:
+      name: invoice
+      in: path
+      required: true
+      schema: { type: integer }
+    NotificationId:
+      name: notification
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    GenericOk:
+      description: Operazione completata
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              message: { type: string, example: Operazione completata. }
+    Unauthenticated:
+      description: Token assente, scaduto o revocato
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Permessi insufficienti per questa operazione
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Non hai i permessi per questa operazione.
+    NotFound:
+      description: Risorsa inesistente
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: Risorsa non trovata.
+    ValidationError:
+      description: Dati non validi
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ValidationErrorBody" }
+    TooManyRequests:
+      description: Troppe richieste — limite di frequenza superato
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+
+    Error:
+      type: object
+      properties:
+        message: { type: string, example: Non hai i permessi per questa operazione. }
+
+    ValidationErrorBody:
+      type: object
+      properties:
+        message:
+          type: string
+          example: I dati inviati non sono validi.
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+          example:
+            email: ["Il campo email è obbligatorio."]
+            scheduled_at: ["Lo slot selezionato non è più disponibile."]
+
+    PaginatedResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { type: object }
+        links:
+          type: object
+          properties:
+            first: { type: string, nullable: true }
+            last: { type: string, nullable: true }
+            prev: { type: string, nullable: true }
+            next: { type: string, nullable: true }
+        meta:
+          type: object
+          properties:
+            current_page: { type: integer, example: 1 }
+            last_page: { type: integer, example: 4 }
+            per_page: { type: integer, example: 15 }
+            total: { type: integer, example: 52 }
+
+    # ------------------------------- Entità ---------------------------------
+
+    User:
+      type: object
+      properties:
+        id: { type: integer, example: 12 }
+        name: { type: string, example: Marco Rossi }
+        email: { type: string, format: email }
+        role: { type: string, enum: [admin, medico, paziente] }
+        status: { type: string, enum: [attivo, sospeso, in_attesa] }
+        phone: { type: string, nullable: true }
+        avatar_url: { type: string, nullable: true }
+        last_login_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+        patient:
+          allOf: [{ $ref: "#/components/schemas/Patient" }]
+          nullable: true
+          description: Presente solo per gli account paziente
+        doctor:
+          allOf: [{ $ref: "#/components/schemas/Doctor" }]
+          nullable: true
+          description: Presente solo per gli account medico
+
+    Patient:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        name: { type: string, description: Dall'account collegato }
+        email: { type: string, format: email }
+        phone: { type: string, nullable: true }
+        codice_fiscale: { type: string, maxLength: 16, nullable: true }
+        birth_date: { type: string, format: date, nullable: true }
+        age: { type: integer, nullable: true, description: Calcolato dalla data di nascita }
+        gender: { type: string, enum: [M, F, altro], nullable: true }
+        birth_place: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        city: { type: string, nullable: true }
+        province: { type: string, nullable: true }
+        postal_code: { type: string, nullable: true }
+        blood_type: { type: string, nullable: true, example: "0+" }
+        allergies:
+          type: array
+          items: { type: string }
+          example: [Penicillina, Lattosio]
+        chronic_conditions:
+          type: array
+          items: { type: string }
+          example: [Ipertensione]
+        notes: { type: string, nullable: true }
+        emergency_contact:
+          type: object
+          properties:
+            name: { type: string, nullable: true }
+            phone: { type: string, nullable: true }
+        primary_doctor:
+          allOf: [{ $ref: "#/components/schemas/Doctor" }]
+          nullable: true
+        created_at: { type: string, format: date-time, nullable: true }
+
+    Doctor:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        name: { type: string, description: Dall'account collegato }
+        email: { type: string, format: email }
+        specialization: { type: string, example: Cardiologia }
+        license_number: { type: string, nullable: true, description: Numero di iscrizione all'albo }
+        bio: { type: string, nullable: true }
+        consultation_fee: { type: number, format: float, example: 80.0 }
+        slot_duration: { type: integer, example: 30, description: Durata standard della visita in minuti }
+        available_online: { type: boolean, description: Abilitato ai teleconsulti }
+        schedules:
+          type: array
+          items: { $ref: "#/components/schemas/DoctorSchedule" }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    DoctorSchedule:
+      type: object
+      properties:
+        id: { type: integer }
+        doctor_id: { type: integer }
+        weekday: { type: integer, minimum: 1, maximum: 7, description: "ISO-8601: 1 = lunedì, 7 = domenica" }
+        weekday_name: { type: string, nullable: true, example: Lunedì }
+        start_time: { type: string, example: "09:00" }
+        end_time: { type: string, example: "13:00" }
+        active: { type: boolean }
+
+    DoctorScheduleInput:
+      type: object
+      required: [weekday, start_time, end_time]
+      properties:
+        weekday: { type: integer, minimum: 1, maximum: 7 }
+        start_time: { type: string, example: "09:00" }
+        end_time: { type: string, example: "13:00" }
+        active: { type: boolean, default: true }
+
+    Slot:
+      type: object
+      description: Slot calcolato a runtime, non persistito
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        available: { type: boolean }
+
+    Appointment:
+      type: object
+      properties:
+        id: { type: integer }
+        patient_id: { type: integer }
+        doctor_id: { type: integer }
+        scheduled_at: { type: string, format: date-time, nullable: true }
+        ends_at: { type: string, format: date-time, nullable: true, description: Calcolato da inizio e durata }
+        date: { type: string, example: "20/09/2026", description: Preformattato per la UI }
+        time: { type: string, example: "10:30", description: Preformattato per la UI }
+        duration_minutes: { type: integer, example: 30 }
+        type: { type: string, enum: [visita, controllo, telemedicina, urgenza] }
+        status: { type: string, enum: [in_attesa, confermato, completato, annullato, assente] }
+        reason: { type: string, nullable: true, description: Motivo indicato dal paziente }
+        notes:
+          type: string
+          nullable: true
+          description: Note interne del medico — **non serializzate per il paziente**
+        cancellation_reason: { type: string, nullable: true }
+        is_editable: { type: boolean }
+        patient:
+          allOf: [{ $ref: "#/components/schemas/Patient" }]
+          nullable: true
+        doctor:
+          allOf: [{ $ref: "#/components/schemas/Doctor" }]
+          nullable: true
+        telemedicine:
+          allOf: [{ $ref: "#/components/schemas/TelemedicineSession" }]
+          nullable: true
+        created_at: { type: string, format: date-time, nullable: true }
+
+    MedicalRecord:
+      type: object
+      properties:
+        id: { type: integer }
+        patient_id: { type: integer }
+        doctor_id: { type: integer }
+        type: { type: string, enum: [diagnosi, referto, esame, nota, vaccinazione, intervento] }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        vitals:
+          type: object
+          additionalProperties: true
+          description: "Parametri liberi ma tipizzati, es. {\"pressione\": \"120/80\", \"peso\": 72}"
+        icd10_code: { type: string, nullable: true, description: Codifica internazionale della diagnosi }
+        recorded_at: { type: string, format: date-time, nullable: true }
+        date: { type: string, example: "20/09/2026" }
+        is_editable: { type: boolean }
+        doctor:
+          allOf: [{ $ref: "#/components/schemas/Doctor" }]
+          nullable: true
+        patient:
+          allOf: [{ $ref: "#/components/schemas/Patient" }]
+          nullable: true
+
+    Document:
+      type: object
+      properties:
+        id: { type: integer }
+        patient_id: { type: integer, nullable: true }
+        category: { type: string, enum: [consenso, referto, fattura, contratto, certificazione, altro] }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        original_name: { type: string }
+        mime_type: { type: string }
+        size: { type: integer, description: Byte }
+        size_label: { type: string, example: "1,4 MB" }
+        status: { type: string, enum: [bozza, da_firmare, firmato, in_conservazione, archiviato] }
+        signature_type: { type: string, enum: [FEA, FEQ], nullable: true }
+        signed_at: { type: string, format: date-time, nullable: true }
+        is_signed: { type: boolean }
+        version: { type: integer }
+        download_url: { type: string }
+        uploader:
+          allOf: [{ $ref: "#/components/schemas/User" }]
+          nullable: true
+        signer:
+          allOf: [{ $ref: "#/components/schemas/User" }]
+          nullable: true
+        created_at: { type: string, format: date-time, nullable: true }
+
+    Medicine:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        active_ingredient: { type: string, nullable: true }
+        aic_code: { type: string, nullable: true, description: Codice AIC ministeriale }
+        form: { type: string, nullable: true, example: compresse }
+        dosage: { type: string, nullable: true, example: 500mg }
+        manufacturer: { type: string, nullable: true }
+        price: { type: number, format: float }
+        requires_prescription: { type: boolean }
+        stock_quantity: { type: integer }
+        min_stock: { type: integer, description: Soglia di riordino }
+        stock_status:
+          type: string
+          enum: [disponibile, in_esaurimento, esaurito]
+          description: Derivato dal confronto fra giacenza e scorta minima
+        batch: { type: string, nullable: true, description: Lotto }
+        expiry_date: { type: string, format: date, nullable: true }
+        active: { type: boolean }
+
+    StockMovement:
+      type: object
+      properties:
+        id: { type: integer }
+        medicine_id: { type: integer }
+        user_id: { type: integer }
+        type: { type: string, enum: [carico, scarico, reso, scaduto, rettifica] }
+        quantity: { type: integer, description: Sempre positivo — il segno lo determina il tipo }
+        stock_after: { type: integer, description: Giacenza risultante, conservata per audit }
+        reason: { type: string, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    Prescription:
+      type: object
+      properties:
+        id: { type: integer }
+        code: { type: string, example: "RX-2026-000123" }
+        patient_id: { type: integer }
+        doctor_id: { type: integer }
+        status: { type: string, enum: [attiva, completata, annullata, scaduta] }
+        notes: { type: string, nullable: true }
+        issued_at: { type: string, format: date, nullable: true }
+        valid_until: { type: string, format: date, nullable: true }
+        is_expired: { type: boolean }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PrescriptionItem" }
+        items_count: { type: integer }
+        patient:
+          allOf: [{ $ref: "#/components/schemas/Patient" }]
+          nullable: true
+        doctor:
+          allOf: [{ $ref: "#/components/schemas/Doctor" }]
+          nullable: true
+        created_at: { type: string, format: date-time, nullable: true }
+
+    PrescriptionItem:
+      type: object
+      properties:
+        id: { type: integer }
+        medicine_id:
+          type: integer
+          nullable: true
+          description: Nullo se il farmaco non è in anagrafica
+        name:
+          type: string
+          description: Conservato in chiaro — la ricetta resta leggibile anche se il farmaco cambia nome
+        dosage: { type: string, nullable: true, example: 1 compressa }
+        frequency: { type: string, nullable: true, example: 2 volte al giorno }
+        duration_days: { type: integer, nullable: true }
+        quantity: { type: integer }
+        notes: { type: string, nullable: true }
+        medicine:
+          allOf: [{ $ref: "#/components/schemas/Medicine" }]
+          nullable: true
+
+    PatientRequest:
+      type: object
+      properties:
+        id: { type: integer }
+        patient_id: { type: integer }
+        doctor_id:
+          type: integer
+          nullable: true
+          description: Nullo = richiesta in coda generale
+        subject: { type: string }
+        description: { type: string }
+        priority: { type: string, enum: [bassa, media, alta] }
+        status: { type: string, enum: [aperta, in_carico, risposta, chiusa] }
+        response: { type: string, nullable: true }
+        responded_at: { type: string, format: date-time, nullable: true }
+        appointment_id: { type: integer, nullable: true }
+        prescription_id: { type: integer, nullable: true }
+        appointment:
+          type: object
+          nullable: true
+          description: Sintesi dell'appuntamento generato dalla conversione
+          properties:
+            id: { type: integer }
+            scheduled_at: { type: string, format: date-time, nullable: true }
+            type: { type: string }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/RequestAttachment" }
+        patient:
+          allOf: [{ $ref: "#/components/schemas/Patient" }]
+          nullable: true
+        doctor:
+          allOf: [{ $ref: "#/components/schemas/Doctor" }]
+          nullable: true
+        created_at: { type: string, format: date-time, nullable: true }
+
+    RequestAttachment:
+      type: object
+      properties:
+        id: { type: integer }
+        original_name: { type: string }
+        mime_type: { type: string }
+        size: { type: integer }
+        download_url: { type: string }
+
+    TelemedicineSession:
+      type: object
+      properties:
+        id: { type: integer }
+        appointment_id: { type: integer }
+        room_code:
+          type: string
+          nullable: true
+          description: Serializzato solo se la sessione è accessibile in quel momento
+        status: { type: string, enum: [programmata, in_corso, terminata, annullata] }
+        is_joinable: { type: boolean }
+        started_at: { type: string, format: date-time, nullable: true }
+        ended_at: { type: string, format: date-time, nullable: true }
+        duration_seconds: { type: integer, nullable: true }
+        notes: { type: string, nullable: true }
+
+    TelemedicineMessage:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        body: { type: string }
+        read_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    Invoice:
+      type: object
+      properties:
+        id: { type: integer }
+        number: { type: string, example: "2026/000123" }
+        patient_id: { type: integer }
+        issue_date: { type: string, format: date, nullable: true }
+        due_date: { type: string, format: date, nullable: true }
+        subtotal: { type: number, format: float }
+        tax_rate: { type: number, format: float, description: Aliquota IVA o bollo }
+        tax_amount: { type: number, format: float }
+        total: { type: number, format: float }
+        paid_amount: { type: number, format: float }
+        balance: { type: number, format: float, description: Saldo residuo }
+        status: { type: string, enum: [bozza, emessa, pagata, parziale, scaduta, stornata] }
+        notes: { type: string, nullable: true }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/InvoiceItem" }
+        payments:
+          type: array
+          items: { $ref: "#/components/schemas/Payment" }
+        patient:
+          allOf: [{ $ref: "#/components/schemas/Patient" }]
+          nullable: true
+        created_at: { type: string, format: date-time, nullable: true }
+
+    InvoiceItem:
+      type: object
+      properties:
+        id: { type: integer }
+        description: { type: string }
+        quantity: { type: integer }
+        unit_price: { type: number, format: float }
+        total: { type: number, format: float }
+
+    Payment:
+      type: object
+      properties:
+        id: { type: integer }
+        invoice_id: { type: integer }
+        amount: { type: number, format: float }
+        method: { type: string, enum: [carta, bonifico, contanti, satispay, assicurazione] }
+        status: { type: string, enum: [in_attesa, completato, fallito, rimborsato] }
+        transaction_ref: { type: string, nullable: true, description: Riferimento del prestatore di servizi di pagamento }
+        paid_at: { type: string, format: date-time, nullable: true }
+
+    Notification:
+      type: object
+      properties:
+        id: { type: integer }
+        category: { type: string, enum: [appuntamento, referto, prescrizione, pagamento, sistema, messaggio] }
+        level: { type: string, enum: [info, successo, attenzione, errore] }
+        title: { type: string }
+        body: { type: string, nullable: true }
+        link: { type: string, nullable: true, description: Rotta del frontend da aprire al click }
+        is_read: { type: boolean }
+        read_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+        created_label: { type: string, example: "2 ore fa" }
+
+    # ---------------------------- Corpi di richiesta -------------------------
+
+    StoreUserRequest:
+      type: object
+      required: [name, email, password, password_confirmation, role]
+      properties:
+        name: { type: string, maxLength: 255 }
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, format: password, minLength: 8 }
+        password_confirmation: { type: string, format: password }
+        role: { type: string, enum: [admin, medico, paziente] }
+        status: { type: string, enum: [attivo, sospeso, in_attesa], nullable: true }
+        phone: { type: string, maxLength: 30, nullable: true }
+        specialization:
+          type: string
+          maxLength: 120
+          nullable: true
+          description: Obbligatoria se `role` è `medico`
+        license_number: { type: string, maxLength: 50, nullable: true }
+        consultation_fee: { type: number, format: float, minimum: 0, nullable: true }
+        slot_duration: { type: integer, minimum: 5, maximum: 240, nullable: true }
+        codice_fiscale: { type: string, minLength: 16, maxLength: 16, nullable: true }
+        birth_date: { type: string, format: date, nullable: true }
+        gender: { type: string, enum: [M, F, altro], nullable: true }
+
+    StorePatientRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id: { type: integer }
+        codice_fiscale: { type: string, minLength: 16, maxLength: 16, nullable: true }
+        birth_date: { type: string, format: date, nullable: true }
+        gender: { type: string, enum: [M, F, altro], nullable: true }
+        birth_place: { type: string, maxLength: 255, nullable: true }
+        address: { type: string, maxLength: 255, nullable: true }
+        city: { type: string, maxLength: 100, nullable: true }
+        province: { type: string, maxLength: 5, nullable: true }
+        postal_code: { type: string, maxLength: 10, nullable: true }
+        blood_type:
+          type: string
+          enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "0+", "0-"]
+          nullable: true
+        allergies:
+          type: array
+          items: { type: string, maxLength: 120 }
+        chronic_conditions:
+          type: array
+          items: { type: string, maxLength: 120 }
+        notes: { type: string, nullable: true }
+        emergency_contact_name: { type: string, maxLength: 255, nullable: true }
+        emergency_contact_phone: { type: string, maxLength: 30, nullable: true }
+        primary_doctor_id:
+          type: integer
+          nullable: true
+          description: Accettato solo dall'amministrazione
+
+    StoreDoctorRequest:
+      type: object
+      required: [user_id, specialization]
+      properties:
+        user_id: { type: integer }
+        specialization: { type: string, maxLength: 120 }
+        license_number: { type: string, maxLength: 50, nullable: true }
+        bio: { type: string, nullable: true }
+        consultation_fee: { type: number, format: float, minimum: 0, nullable: true }
+        slot_duration: { type: integer, minimum: 5, maximum: 240, nullable: true }
+        available_online: { type: boolean, nullable: true }
+
+    StoreAppointmentRequest:
+      type: object
+      required: [patient_id, doctor_id, scheduled_at]
+      properties:
+        patient_id: { type: integer }
+        doctor_id: { type: integer }
+        scheduled_at:
+          type: string
+          format: date-time
+          description: Deve essere successivo all'istante corrente
+        duration_minutes:
+          type: integer
+          minimum: 5
+          maximum: 240
+          nullable: true
+          description: Se omessa si usa la durata standard dello slot del medico
+        type: { type: string, enum: [visita, controllo, telemedicina, urgenza], nullable: true }
+        reason: { type: string, maxLength: 255, nullable: true }
+        notes: { type: string, nullable: true }
+
+    UpdateAppointmentRequest:
+      type: object
+      properties:
+        scheduled_at: { type: string, format: date-time }
+        duration_minutes: { type: integer, minimum: 5, maximum: 240, nullable: true }
+        type: { type: string, enum: [visita, controllo, telemedicina, urgenza] }
+        status:
+          type: string
+          enum: [in_attesa, confermato, completato, annullato, assente]
+          description: Riservato a medico e amministrazione
+        reason: { type: string, maxLength: 255, nullable: true }
+        notes: { type: string, nullable: true }
+        cancellation_reason: { type: string, maxLength: 500, nullable: true }
+
+    StoreMedicalRecordRequest:
+      type: object
+      required: [patient_id, type, title]
+      properties:
+        patient_id: { type: integer }
+        appointment_id: { type: integer, nullable: true }
+        type: { type: string, enum: [diagnosi, referto, esame, nota, vaccinazione, intervento] }
+        title: { type: string, maxLength: 255 }
+        description: { type: string, nullable: true }
+        vitals:
+          type: object
+          additionalProperties: true
+          nullable: true
+        icd10_code: { type: string, maxLength: 10, nullable: true }
+        recorded_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Non può essere nel futuro
+
+    StorePrescriptionRequest:
+      type: object
+      required: [patient_id, items]
+      properties:
+        patient_id: { type: integer }
+        appointment_id: { type: integer, nullable: true }
+        notes: { type: string, nullable: true }
+        issued_at: { type: string, format: date, nullable: true }
+        valid_until: { type: string, format: date, nullable: true }
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [name]
+            properties:
+              medicine_id: { type: integer, nullable: true }
+              name: { type: string, maxLength: 255 }
+              dosage: { type: string, maxLength: 100, nullable: true }
+              frequency: { type: string, maxLength: 100, nullable: true }
+              duration_days: { type: integer, minimum: 1, maximum: 365, nullable: true }
+              quantity: { type: integer, minimum: 1, nullable: true }
+              notes: { type: string, nullable: true }
+
+    StoreMedicineRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 255 }
+        active_ingredient: { type: string, maxLength: 255, nullable: true }
+        aic_code: { type: string, maxLength: 20, nullable: true }
+        form: { type: string, maxLength: 60, nullable: true }
+        dosage: { type: string, maxLength: 60, nullable: true }
+        manufacturer: { type: string, maxLength: 255, nullable: true }
+        price: { type: number, format: float, minimum: 0, nullable: true }
+        requires_prescription: { type: boolean, nullable: true }
+        stock_quantity: { type: integer, minimum: 0, nullable: true }
+        min_stock: { type: integer, minimum: 0, nullable: true }
+        batch: { type: string, maxLength: 60, nullable: true }
+        expiry_date:
+          type: string
+          format: date
+          nullable: true
+          description: Deve essere successiva a oggi
+        active: { type: boolean, nullable: true }
+
+    StoreInvoiceRequest:
+      type: object
+      required: [patient_id, items]
+      properties:
+        patient_id: { type: integer }
+        appointment_id: { type: integer, nullable: true }
+        issue_date: { type: string, format: date, nullable: true }
+        due_date: { type: string, format: date, nullable: true }
+        tax_rate: { type: number, format: float, minimum: 0, maximum: 100, nullable: true }
+        status:
+          type: string
+          enum: [bozza, emessa, pagata, parziale, scaduta, stornata]
+          nullable: true
+        notes: { type: string, nullable: true }
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [description, unit_price]
+            properties:
+              description: { type: string, maxLength: 255 }
+              quantity: { type: integer, minimum: 1, nullable: true }
+              unit_price: { type: number, format: float, minimum: 0 }

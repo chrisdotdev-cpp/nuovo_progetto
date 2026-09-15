@@ -292,4 +292,4 @@ Gli errori hanno sempre la stessa forma:
 
 ## Licenza
 
-Distribuito con licenza MIT.
+Distribuito con licenza MIT. Vedi il file [`LICENSE.md`](LICENSE.md).
