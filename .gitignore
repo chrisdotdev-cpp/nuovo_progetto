@@ -152,5 +152,4 @@ $RECYCLE.BIN/
 *.orig
 *.rej
 file_md/
-Claude outputs/
 *~
